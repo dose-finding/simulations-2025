@@ -1,0 +1,445 @@
+---
+title: "Multi-arm multi-stage trials Simulation" 
+author: "Dom/Pavel"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_document:
+    theme: lumen 
+    highlight: tango
+    toc: true           
+    toc_depth: 3       
+    toc_float: true     
+    fig_width: 9
+    fig_height: 6
+    df_print: paged
+    css: html/styles.css    
+    number_sections: false
+  pdf_document:
+    highlight: tango
+    latex_engine: xelatex
+    fig_width: 9
+    fig_height: 5
+    df_print: paged
+    number_sections: false
+---
+
+<!--- rmarkdown::render("~/courses/bsu/16m=MamsTrialSimulation/20251022-IBIG/practical/Practical2-MAMS.Rmd") --->
+
+
+
+```{r setup, include=FALSE}
+rm(list=ls())
+```
+
+This markdown document contains the exercises of the second practical session of the course *`A practical introduction to simulating complex trial designs'* (2025 IBIG).
+
+* dominique.couturier@mrc-bsu.cam.ac.uk
+* pavel.mozgunov@mrc-bsu.cam.ac.uk
+
+## Load packages
+
+we first load the following required R packages 
+
+* **MAMS**: design multi-arm multi-stage studies, 
+* **mvtnorm**: use multivariate normal and multivariate t densities.
+
+```{r message = FALSE, warning = FALSE, include=TRUE}
+library(MAMS)
+plan(multisession)
+library(mvtnorm)
+```
+
+If one of these packages is not available on our computer, it can be installed by means of the function **install.packages()**. To install the package MAMS, for example, use
+
+```{r message = FALSE, warning = FALSE, include=TRUE}
+# install.packages("MAMS",dep=TRUE)
+```
+
+# TREADON trial
+
+Our exercises are based on (a version of) the TREADON trial investigating treatments against *plantar heal pain*, a condition affecting the walking abilities of 1 in 10 adults during their lifetime. In this trial, the average level of pain observed in the reference group (using a **self-management advice booklet**) is compared to the one of 2 treatment groups considering **foot orthoses (T1)**, and **exercises (T2)** on top of the self-management booklet.
+
+It is assumed that
+
+* the pain score outcome is normally distributed, 
+* the difference between the average pain level of the best treatment group and the control group equals 0.8 (**delta**),
+* the standard deviation of the outcome, as estimated in a pilot study, equals 2.7 (**sd**),
+* there are 2 treatment arms (**K**), i.e., 3 groups in total including the control,
+* this is a 2-stage trial (**J**),
+* O'Brien & Fleming predefined shapes will be used to define the efficacy boundaries 'e1' and 'e2' (**ushape**),
+* the futility boundary at stage 1, 'f1', equals 0 (**lshape** and **lfix**),
+* the trial stops as soon as a treatment is found effective or both treatments are dropped for futility,
+* equal sample sizes per group and stage will be used.
+
+Assuming a target FWER of 0.05 (**alpha**), we can define the efficacy and futility boundaries as well as the sample size required to detect the effect size of interest with a probability of 0.9 (**power**) by means of the mams function of the MAMS package as follows (check **?mams** for detail):
+
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+set.seed(1)
+design1 = mams(K=2, J=2, alpha=0.05, power=0.9, r=1:2, r0=c(1,2), 
+               p=NULL, p0=NULL, delta=0.8, delta0=0,sd=2.7, 
+               ushape="obf", lshape="fixed", ufix=NULL, lfix=0, 
+               nstart=1, nstop=NULL, sample.size=TRUE, Q=20,
+               type="normal", parallel=TRUE, print=FALSE)
+               
+summary(design1)         
+```
+
+The output is a list. Its elements **u** and **l**, respectively corresponding to the efficacy and futility boundaries (**a**, **b**, **c** values in the slides), and the elements **rMat** and **n**, respectively corresponding to the matrix of cumulated allocation ratios per group and sample size corresponding to an allocation ratio of 1, can be extracted as follows:
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+design1$u
+design1$l
+design1$rMat
+design1$n
+```
+
+We can now define **nMat**, the cumulated sample size per group and stage, by multiplying the reference sample size (**n**) by the matrix of cumulated allocation ratios per group and stage (**rMat**) as follows
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+nMat = design1$n * design1$rMat
+dimnames(nMat) = list(c("Ctrl","T1","T2"),paste("Stage",1:2))
+nMat
+```
+
+We can check that the sum of the sample size per group at the last stage, `r sum(nMat[,ncol(nMat)])`, corresponds to the maximum total sample size of the MAMS function showed above.
+
+
+# Simulation functions
+
+The operating characteristics of the trial design described above can be assessed by simulation. This section introduces two functions allowing to simulate MAMS test statistics and trials. 
+
+## A: mams.stats()
+
+The function **mams.stats()** allows us to generate, for a (simulated) trial, both the matrix of estimated mean differences between each treatment arm and the control (rows) at each stage (columns), as well as the corresponding matrix of test statistics. These statistics are generated so that the dependence induced by considering the same control group and cumulated evidence is taken into account. The input arguments of this function are 
+
+* **nMat**: a ((K+1) x J) matrix indicating the *cumulated* sample size per group (the 1st row corresponds to the control group) and stage (column),
+* **delta**: the interesting effect, i.e., the difference in means between the first treatment arm (T1) and the control group,
+* **delta0**: the uninteresting effect, i.e., difference in means between the other treatment arm(s) and the control group,
+* **sd**: the standard deviation (same for all groups).
+
+This function returns a list with 3 elements
+
+* **zstat**: the (K x J) matrix of test statistics corresponding to each treatment arm (rows) and stage (columns),
+* **diff**: the (K x J) matrix of difference in pain level between each treatment arm and the control (rows) at each stage (columns),
+* **n**: a ((K+1) x J) matrix indicating the *cumulated* sample size per group (the 1st row corresponds to the control) and stage (column).
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+mams.stats = function(nMat,delta,delta0,sd){
+    # nMat = ceiling(rMat*n); sd = 2.7; delta = 0.8; delta0 = 0
+    
+    sig = sd
+    nMat = t(nMat)
+    r0 <- nMat[,1]/nMat[1,1]
+    if(ncol(nMat)==2){R <-  t(t(nMat[,-1]/nMat[1,1]))
+    }else{R <-  nMat[,-1]/nMat[1,1]}
+    if(!is.matrix(R) && is.vector(R))  R <- t(as.matrix( nMat[, -1]/nMat[1, 1]))    
+    n <- nMat[1,1]        
+    #
+    J<-dim(R)[1]
+    K<-dim(R)[2]
+    Rdiff<-R-rbind(0,R[-J,])
+    r0diff<-r0-c(0,r0[-J])
+    deltav<-c(delta,rep(delta0,K-1))
+    #
+    mukhats<-apply(matrix(rnorm(J*K),J,K)*sig*sqrt(Rdiff*n)+Rdiff*n*matrix(deltav,nrow=J,ncol=K,byrow=TRUE),2,cumsum)/(R*n)
+    mu0hats<-cumsum(rnorm(J,0,sig*sqrt(r0diff*n)))/(r0*n)
+    #
+    diff = t(mukhats-mu0hats)
+    zks<-t((mukhats-mu0hats)/(sig*sqrt((R+r0)/(R*r0*n))))
+    rownames(zks) = rownames(diff) = paste0("T",1:K)
+    colnames(zks) = colnames(diff) = paste0("Stage ",1:J)
+    #
+    mtxn = ceiling(t(cbind(r0,R))*n)
+    rownames(mtxn) = c("Ctrl",paste0("T",1:K))
+    colnames(mtxn) = colnames(zks)
+    #
+    list(zstat=zks, diff=diff, n=mtxn)
+    }
+```
+
+Let's generate the statistics for a simulated TREADON trial given the trial characteristics mentioned above. We will set the seed to 1 with the function **set.seed()**.
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+set.seed(1)
+trial1 = mams.stats(nMat, delta = 0.8, delta0 = 0, sd = 2.7)
+trial1
+```
+
+We can note that 
+
+* the test statistic of T1 is large at the second stage,
+* the test statistic of T2 is smaller than 0 at the first stage.
+
+## B: mams.trial()
+
+The function **mams.trial()** takes as input the result of the function **mams.stats()** and compare the test statistics to the efficacy and futility boundaries for each treatment arm at each stage. Its input arguments are:
+
+* **obj**: the output of the **mams.sim()** function (see above),
+* **u**: the vector of efficacy boundaries (of length J), 
+* **l**: the vector of futility boundaries (of length J).
+
+The output of **mams.trial()** is a list with the same elements as the **mams.stats()** plus the following ones:
+
+* **eff.all**: a (K x J) matrix of logicals indicating if the test statistic of each treatment arm (rows) and stage (columns) was *greater* than the corresponding efficacy boundary. The function returns NA at stage 2 if the trial was stopped early.  
+* **fut.all**: a (K x J) matrix of logicals indicating if the test statistic of each treatment arm (rows) and stage (columns) was *smaller* than the corresponding futility boundary. The function returns NA at stage 2 if the trial was stopped early.  
+* **eff.any**: a logical indicating if any treatment arm was found effective. 
+* **eff.T1**: a logical indicating if T1 was found effective and, if several treatments were found effective, if T1 had the largest test statistic. 
+* **stage**: an integer indicating at which stage the trial stopped.
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+mams.trial = function(obj, u, l){
+    # obj = trial1; u=design1$u; l=design1$l
+    J = ncol(obj$zstat)
+    K = nrow(obj$zstat)
+    # 
+    fmat = emat = matrix(NA,nrow=K,ncol=J) 
+    rownames(fmat) = rownames(emat) = paste0("T",1:K)
+    colnames(fmat) = colnames(emat) = paste0("Stage ",1:J)    
+    remaining<-rep(T,K)
+    for(j in 1:J){
+        emat[remaining,j] <-((obj$zstat[remaining,j])>u[j])
+        fmat[remaining,j] <-((obj$zstat[remaining,j])<l[j])
+        remaining<-(obj$zstat[,j]>l[j])&remaining
+        if(any(emat[,j],na.rm=TRUE)|all(fmat[,j],na.rm=TRUE)){break}
+    }
+    # any arm > control?
+    rej=ifelse(any(emat[,j],na.rm=TRUE),j,0)
+    # if yes, is T1 also the arm with the largest test statistics among remaing arms?
+    first=ifelse(rej>0,ifelse(!is.na(emat[1,j])&emat[1,j],obj$zstat[1,j]==max(obj$zstat[remaining,j]),FALSE),FALSE)
+    # for each arm: value of delta, status code (0 = none, 1 = fut, 2 = eff), look 
+    c(obj, list(eff.all = emat, fut.all = fmat,
+         eff.any = rej>0, eff.T1 = first, stage = j))
+    }
+```
+
+Let's analyse the results of the first simulated trial by means of the function **mams.trial()** using the efficacy and futility boundaries defined by the **MAMS()** function (and stored in the object **design1**):
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+mams.trial(trial1, u=design1$u, l=design1$l)
+
+```
+
+We can note that
+
+* T1 was found to be effective (and to be the best treatment) at stage 2,
+* the treatment arm corresponding to T2 was stopped for futility at stage 1 (due to its test statistic being negative, i.e. smaller than 'a').
+
+# Tasks
+
+Using the **mams.stats()** and **mams.trial()** functions introduced above, do the following tasks: 
+
+## 1/ 25'000 trials under H1 and H0
+
+With a **for loop** or the **lapply function**, generate 25000 random trials and store the results in a list of length 25000 both under
+ 
+* the alternative hypothesis (i.e., assuming that delta = 0.8 for T1, delta0 = 0 for T2 and sd = 2.7), 
+* the global null hypothesis (i.e., assuming that delta = delta0 = 0 and sd = 2.7),   
+    
+## 2/ Power, FWER
+
+Using the results of Tasks 1/, check that the power and the FWER, as defined on slide 19, are respectively close to 90% and 5%. Use confidence intervals to take  into account the uncertainty of the Monte Carlo simulation. 
+
+
+## 3/ Early stopping prob
+
+Estimate the proportion of time we stop early
+
+    * for any reason,
+    * for efficacy,
+    * for futility
+
+both under the null and alternative hypotheses.
+
+
+## 4/ ESS
+
+the function **mams.sim()** of the MAMS package allows to estimate the expected sample size (ESS) of a design of interest. For the TREADON trial considered above, under the alternative hypothesis, the following syntax can be used to estimate the ESS:
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+mams.sim(nsim=25000, nMat=t(nMat), u=design1$u, l=design1$l,
+         pv=NULL, delta = c(0.8,0), sd=2.7, ptest=1, parallel=TRUE)
+         
+```
+
+Reproduce this ESS estimate using the results of Task 1/.
+
+
+## 5/ Drop-out
+
+Let's assume that 15% of the participants of the control group and 2.5% of the participants of T1 unexpectedly drop out without providing pain score data. As in Task 2/, estimate the FWER and power under such a scenario, assuming that the same efficacy and futility bounds are used.
+
+## 6/ Reversed conclusion
+
+Under the alternative hypothesis, among cases in which T1 was found to be the most effective (best) treatment, estimate the proportion of times the conclusion would be reversed if the study had not been stopped early.
+
+## 7/ Biases
+
+In MAMS and adaptive designs, it has been shown that, when finding a treatment effective, its effect size is 
+
+* likely overestimated when stopping early,
+* likely slightly underestimated when going to the end of trial.
+
+Using the results of Task 1/, estimate and display the expected bias for T1 in both situations. Do the same when T1 is not found effective.
+
+## 8/ Expected trial duration
+
+For this task, we first introduce an additional simulation function, **mams.recruitment()**, that allows us to track participants' recruitment and data delivery times. 
+
+### mams.recruitment()
+
+The function **mams.recruitment()** takes the following arguments:
+
+* **nMat**: a ((K+1) x J) matrix indincating the (theoretical) *cumulated* sample size per group (the 1st row corresponds to the control) and stage (column),
+* **numberenrolled**: a character string describing how to generate (random) number of participants per unit of time (output should be a positive integer). An example could be "rpois(1, 10)".
+* **timetodata**: a character string describing how to generate (random) time to get data per participant (the output should be a positive number). Examples are  "rnorm(1, 40, 5)" and "as.numeric(1)".
+* **participant**: a logical indicating if the participant data should be saved in the output.
+
+The output is a list of 4 elements:
+
+* **time**: the (K x J) matrix indicating the number of units of time required to collect the information for each treatment arm (rows) and stage (columns). The analysis time point of stage *j* corresponds to the time required to collect the number of pre-planed observations (as indicated in **nMat[,j]**) in all groups. It thus equals  **max(time[,j])**,
+* **nMat**: the (K x J) matrix indicating the cumulated number of participants who delivered data at the analysis time point of each stage (columns) for each treatment arm (rows),
+* **numberenrolled**: the (K x J) matrix indicating the cumulated number of participants enrolled in each treatment arm (rows) at any stage (columns),
+* **participants**: a data frame of N rows (one per participant) sharing information on each participant (group, recruitment time (start), data delivery time (end), stage). This information is only available if 'participant' was set to 'TRUE'.
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 12, fig.width = 10, fig.align = "center"}
+
+mams.recruitment <- function(nMat,numberenrolled,timetodata,participant=FALSE){ 
+        # numberenrolled="rpois(1, 7)" ; timetodata = "rnorm(1, 40, 5)"; participant=TRUE
+        nmat = nMat - cbind(0,nMat[,-ncol(nMat)])
+        N    = sum(nmat)
+        K    = nrow(nmat)-1
+        J    = ncol(nmat)
+        # panel
+        id.i = data.frame(id=1:N,
+                          group=rep(c("Ctrl",paste0("T",1:K)),nMat[,J])[order(runif(N))])
+        # define start and end times per participant
+        MAMS.eval = function(expr,...){eval(parse(text = noquote(expr)),...)}
+        time.fun  = function(N,fun){
+            n_time = c()
+            nobs = 0
+            while(nobs<N){
+                n_time = c(n_time,MAMS.eval(fun))
+                nobs = sum(n_time)
+                }
+            n_time    
+            }            
+        n.i_time = time.fun(N,fun=numberenrolled)    
+        n.time = length(n.i_time)
+        id.i$start = rep(1:n.time,n.i_time)[1:N]
+        id.i$end   = id.i$start+
+                     ceiling(sapply(1:N,function(x,fun)MAMS.eval(fun),fun=timetodata))
+        # split participant per group and assign to stage
+        # 
+        id.i_group = lapply(split(id.i,id.i$group),function(x)x[order(x$end),])
+        id.i = NULL
+        for(gw in 1:(K+1)){
+                if(J>1){
+                    id.i_group[[gw]]$stage = rep(1:J,nmat[gw,])
+                }else{
+                    id.i_group[[gw]]$stage = 1
+                }
+            id.i = rbind(id.i,id.i_group[[gw]])    
+            }
+        rownames(id.i) = 1:N    
+        # define time of each stage per arm and number of enrolled participants at that time
+        timew = t(sapply(id.i_group,function(x){
+                  tapply(x$end,x$stage,max)}))
+        time.stage = apply(timew,2,max)
+        # reassign stage
+        id.i$stage = NA
+        for(jw in J:1){
+            id.i$stage[id.i$end<=time.stage[jw]] = jw
+            }
+        # deduce effective nMat 
+        nMat.obs = t(apply(table(id.i$group,id.i$stage),1,cumsum))
+        # deduce number enrolled
+        id.i_group = split(id.i,id.i$group)
+        numberinw = t(sapply(id.i_group,function(x){
+              time_stage = tapply(x$end,x$stage,max)
+              sapply(time_stage,function(y,x){
+                     sum(x$start<=y)},x=x)}))
+        colnames(timew) = colnames(numberinw) = colnames(nMat.obs) = paste0("Stage ",1:ncol(timew))
+        # 
+        if(participant){
+            out = list(time = timew, nMat.obs = nMat.obs, 
+                       numberenrolled= numberinw, participants=id.i)
+        }else{
+            out = list(time = timew, nMat.obs = nMat.obs, 
+                       numberenrolled= numberinw)
+        }
+        class(out) = "mams.recruitment"
+        out
+        }
+plot.mams.recruitment = function(obj){# obj = trial1time
+    par(mfrow=c(1,1),mar=c(4,3.5,0,0))
+    if(is.null(obj$participants)){stop("no partic inf available")}
+    id.i  = obj$participants
+    id.i$group = factor(id.i$group)
+    N     = nrow(id.i)
+    xlimw = c(0,max(id.i$end))
+    ylimw = c(N,-N*.15)
+    plot(1,1,pch="",xlim=xlimw,ylim=ylimw,
+         xlab="Time",ylab="",axes=FALSE)
+    axis(1)
+    axis(2,at=N/2,tick=FALSE,
+         "Participants ordred by groups and data delivery times",
+         pos=-1)
+    for(iw in 1:N){
+        colw = as.numeric(id.i$group[iw])
+        ltyw = id.i$stage[iw]
+        points(c(id.i$start[iw],id.i$end[iw]),c(iw,iw),
+               col=colw,pch=16,cex=.25)
+        segments(id.i$start[iw],iw,id.i$end[iw],
+                 col=colw,lty=ltyw, lwd=.25)
+        }
+    # times
+    for(j in 1:(ncol(obj$time)-1)){
+        abline(v = obj$time[,j],col=1:nrow(obj$time),lwd=1)
+        }
+    # legend 
+    legendw = c(levels(id.i$group),paste0("Stage ",unique(id.i$stage)))    
+    legend("top",legend=legendw,
+           ncol = length(legendw),bg = "light gray",
+           col = c(1:nlevels(id.i$group),rep(1,length(unique(id.i$stage)))),
+           pch = c(rep(16,nlevels(id.i$group)),rep(NA,length(unique(id.i$stage)))),
+           lty = c(rep(NA,nlevels(id.i$group)),1:length(unique(id.i$stage))),
+           box.lwd = NA)
+    }
+```
+
+Let's assume that 
+
+* the unit of time is the *week*,
+* we expect the number of participants recruited on a weekly basis to be Poisson distributed with, on average, 1 person a day, i.e., 7 people a week,
+* once recruited, we expect the participants to provide data, on average, after 40 weeks with a standard deviation of 5, according to a Gaussian distribution.
+
+Let's define the number of units of time required to collect the information for each treatment arm and stage, as well as the number of participants enrolled in each treatment arm at any stage:
+
+```{r message = FALSE, warning = FALSE, include=TRUE, fig.height = 7, fig.width = 10, fig.align = "center"}
+
+trial1time = mams.recruitment(nMat, numberenrolled="rpois(1, 7)",
+                              timetodata = "rnorm(1, 40, 5)", participant=TRUE) 
+trial1time$time
+trial1time$numberenrolled
+trial1time$nMat.obs
+plot(trial1time)                              
+```
+This simulation shows that, under the assumed recruitment rate and time to data functions we chose, most patients of stage 2 are already enrolled when the analysis of the data of stage 1 is possible (i.e., when at least n=119 participants are observed in all groups). 
+
+### Exercise
+
+With a **for loop** or the **lapply function**, 
+
+* use the same **numberenrolled** and **timetodata** arguments as in the example above to simulate **effective sample size** at each stage per group with the  **mams.recruitment()** function for 1000 trials 
+* then use this information (element **nMat.obs** of the output) to generate trials under the alternative hypothesis as in Task 1/.
+* finally estimate
+    * the expected study time at each stage,
+    * the expected number of people enrolled in the study.
+
